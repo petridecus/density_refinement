@@ -5,10 +5,17 @@ import sys
 import tqdm
 
 '''
+https://www.xtal.iqfr.csic.es/Cristalografia/parte_07-en.html
 equation to calculate density model from .cif file (hkl intensities aka Fhkl)
 p(xyz) = 1/V * sum(|Fhkl| .* e^(-i * (2pihx + 2piky + 2pilz))) ==> e^-it = cost - isint
          1/V * sum(|Fhkl| .* (cos(2pihx + 2piky + 2pilz) - isin(2pihx + 2piky + 2pilz)))
 need to determine volume and do this operation for every value of hkl and xyz
+
+simplified when unit cell is "centrosymmetric"
+2/V * sum(|Fhkl| .* cos2pi(hx + ky + lz)) - so basically it gets rid of the sin part of the equation? 
+
+"Patterson function"
+1/v * sum(|Fhkl|^2 .* cos2pi(hu + kv + lw)) -> this actually creates inaccurate atom coordinates unless processed
 '''
 
 # this will be different array of scatter factors for every atom type
@@ -38,18 +45,17 @@ yv = []
 zv = []
 
 cryst = []
-reso = 0.1
+# reso = 0.05
 
 # reads crystal size and resolution from cif file
 def read_cif(filename: str):
     global cryst, reso
-    f = open(filename)
+    lines = open(filename).readlines()
 
     num_datapoints = 0
 
-    lines = f.readlines()
-
-    for line in lines:
+    for ii in tqdm.tqdm(range(len(lines)), "Parsing diffraction data from cif file"):
+        line = lines[ii]
         if '_cell.length_a' in line:
             cryst[0] = float(line[20:])
             continue
@@ -59,6 +65,7 @@ def read_cif(filename: str):
         if '_cell.length_c' in line:
             cryst[2] = float(line[20:])
             continue
+        # TODO figure out if resolution is supposed to be this bad
         if '_diffrn_reflns.pdbx_d_res_high' in line:
             # reso = float(line[33:]) / 10
             continue
@@ -66,14 +73,9 @@ def read_cif(filename: str):
             num_datapoints = int(line[33:])
 
     data_starting_line = len(lines) - (num_datapoints + 1)
-    print("reading " + str(num_datapoints) + " lines starting at line " + str(data_starting_line))
-    print(lines[data_starting_line - 1])
     data_lines = lines[data_starting_line:]
-    print("data lines contains: " + str(len(data_lines)))
 
-    for ii in range(len(lines) - 1):
-        line = lines[ii].split()
-        print(line)
+    return data_lines
 
 
 # reads in 'max_atoms' element types and coordinates from given file 'f' 
@@ -82,8 +84,9 @@ def read_pdb(filename: str, max_atoms: int = 30000):
     element_types = []
     num_atoms = 0
 
-    f =  open(filename)
-    for line in f: 
+    lines =  open(filename).readlines()
+    for ii in tqdm.tqdm(range(len(lines)), "Parsing PDB file"): 
+        line = lines[ii]
         if line[0:4] == 'ATOM':
             atoms.append([float(line[31:38]), float(line[39:46]), float(line[47:54])])
             element_types.append(line[13])
@@ -104,7 +107,7 @@ def real_space_density(atoms, element_types, cryst, b):
     pi = np.pi
 
     # 3d equivalent to operations on rho, just add in Z dimension? 
-    for ii in tqdm.tqdm(range(len(atoms))):
+    for ii in tqdm.tqdm(range(len(atoms)), "Calculating diffraction data from atom cooords"):
         atom = atoms[ii]
         scat = scatter_vals[element_types[ii]]
 
@@ -148,11 +151,11 @@ def main():
              round(int((max_vals[1] - min_vals[1]) / 10)) * 10 + 10, 
              round(int((max_vals[2] - min_vals[2]) / 10)) * 10 + 10]
 
-    reso = 0.1
+    reso = 0.05
     b = 1
 
     if len(sys.argv) == 3:
-        read_cif(sys.argv[2])
+        cif_lines = read_cif(sys.argv[2])
     
     step = reso / 3
 
@@ -175,7 +178,7 @@ def main():
     # n-dimensionl fourier tranform to get into reciprocal space
     recip = np.fft.rfftn(rho_3d)
 
-    # isolate real and reciprocal elements at every point
+    # isolate real and imaginary elements at every point
     recip_x = recip.real
     recip_y = recip.imag
 

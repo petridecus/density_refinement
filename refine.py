@@ -4,20 +4,6 @@ import math
 import sys
 import tqdm
 
-'''
-https://www.xtal.iqfr.csic.es/Cristalografia/parte_07-en.html
-equation to calculate density model from .cif file (hkl intensities aka Fhkl)
-p(xyz) = 1/V * sum(|Fhkl| .* e^(-i * (2pihx + 2piky + 2pilz))) ==> e^-it = cost - isint
-         1/V * sum(|Fhkl| .* (cos(2pihx + 2piky + 2pilz) - isin(2pihx + 2piky + 2pilz)))
-need to determine volume and do this operation for every value of hkl and xyz
-
-simplified when unit cell is "centrosymmetric"
-2/V * sum(|Fhkl| .* cos2pi(hx + ky + lz)) - so basically it gets rid of the sin part of the equation? 
-
-"Patterson function"
-1/v * sum(|Fhkl|^2 .* cos2pi(hu + kv + lw)) -> this actually creates inaccurate atom coordinates unless processed
-'''
-
 # this will be different array of scatter factors for every atom type
 # this appears to be arranged as:
 # [c, a1, a2, a3, a4, b1, b2, b3, b4]
@@ -40,12 +26,12 @@ s_scat = [0.8669, 6.9053, 5.2034,
 
 scatter_vals = dict(H = h_scat, C = c_scat, N = n_scat, O = o_scat, S = s_scat)
 
-xv = []
-yv = []
-zv = []
-
-cryst = []
-# reso = 0.05
+# globals 
+lin_r = [[], [], []]
+lin_f = [[], [], []]
+cryst = [0, 0, 0]
+coord_dims = [[], []]
+reso = 5
 
 # reads crystal size and resolution from cif file
 def read_cif(filename: str):
@@ -65,9 +51,8 @@ def read_cif(filename: str):
         if '_cell.length_c' in line:
             cryst[2] = float(line[20:])
             continue
-        # TODO figure out if resolution is supposed to be this bad
         if '_diffrn_reflns.pdbx_d_res_high' in line:
-            # reso = float(line[33:]) / 10
+            reso = float(line[33:]) / 2
             continue
         if '_diffrn_reflns.number' in line:
             num_datapoints = int(line[33:])
@@ -94,16 +79,73 @@ def read_pdb(filename: str, max_atoms: int = 30000):
         if num_atoms > max_atoms:
             break
 
+    global coord_dims
+    coord_dims[0] = np.amin(atoms, axis=0)
+    coord_dims[1] = np.amax(atoms, axis=0)
+
     return atoms, element_types
+
+'''
+https://www.xtal.iqfr.csic.es/Cristalografia/parte_07-en.html
+equation to calculate density model from .cif file (hkl intensities aka Fhkl)
+p(xyz) = 1/V * sum(|Fhkl| .* e^(-i * (2pihx + 2piky + 2pilz))) ==> e^-it = cost - isint
+         1/V * sum(|Fhkl| .* (cos(2pihx + 2piky + 2pilz) - isin(2pihx + 2piky + 2pilz)))
+need to determine volume and do this operation for every value of hkl and xyz
+
+simplified when unit cell is "centrosymmetric"
+2/V * sum(|Fhkl| .* cos2pi(hx + ky + lz)) - so basically it gets rid of the sin part of the equation?
+'''
+def reciprocal_space_density(cif_data):
+    xv_f, yv_f, zv_f = np.meshgrid(lin_f[0], lin_f[1], lin_f[2])
+    f_c = np.zeros((len(xv_f), len(xv_f[0]), len(xv_f[0][0])))
+    
+    # create linespaces to iterate thru xyz
+    # for each xyz point calculate p value based on equation from site
+    cryst_vol = cryst[0] * cryst[1] * cryst[2]
+
+    for ii in tqdm.tqdm(range(len(cif_data) - 1), "Creating density map from raw crystal data"):
+        data = cif_data[ii].split()
+
+        if len(data) < 7:
+            print("short line: " + str(data))
+            continue
+
+        if data[6] != 'o' and data[6] != 'f':
+            continue
+    
+        # h k l are data[3-5]
+        hkl_coef = 2 * np.pi * (float(data[3]) * xv_f + float(data[4]) * yv_f + float(data[5]) * zv_f)
+        complex_val = np.cos(hkl_coef) - 1j* np.sin(hkl_coef)
+        f_c += (abs(float(data[7])) * hkl_coef)
+    
+    f_c = f_c / cryst_vol
+
+    f_realspace = np.fft.irfftn(f_c, f_c.shape) # , f_c.shape)
+    fig1 = go.Figure(data=go.Volume(x=xv_f.flatten(), y=yv_f.flatten(), z=zv_f.flatten(), 
+                                     value=f_realspace.flatten(), isomin=0.2, isomax=1.0, 
+                                     surface_count=5, opacity=0.5))
+    fig1.show()
+
+    return f_c 
 
 # atoms: coordinates of atoms read from pdb
 # element_types: element types of atoms read from pdb
 # crystal: dimensions in 3D of crystal
 # b: b factor(s) #TODO
-def real_space_density(atoms, element_types, cryst, b):
+def real_space_density(atoms, element_types, b):
+    global cryst
+
+    max_vals = coord_dims[1] - coord_dims[0]
+    xv_r, yv_r, zv_r = np.meshgrid(lin_r[0], lin_r[1], lin_r[2])
+    xv_f, yv_f, zv_f = np.meshgrid(lin_f[0], lin_f[1], lin_f[2])
+
     # rho starts as all zeros and every atom iteration will add info to it 
-    rho_3d = np.zeros((len(xv), len(xv[0]), len(xv[0][0])))
-    atommask = np.full((len(xv), len(xv[0]), len(xv[0][0])), False, dtype=bool)
+    rho_3d = np.zeros((len(xv_r), len(xv_r[0]), len(xv_r[0][0]))) # each meshgrid array has correct dimensions so we can use xv
+    atommask = np.full((len(xv_r), len(xv_r[0]), len(xv_r[0][0])), False, dtype=bool)
+
+    rho_3d = np.zeros((len(xv_f), len(xv_f[0]), len(xv_f[0][0]))) # each meshgrid array has correct dimensions so we can use xv
+    atommask = np.full((len(xv_f), len(xv_f[0]), len(xv_f[0][0])), False, dtype=bool)
+    
     pi = np.pi
 
     # 3d equivalent to operations on rho, just add in Z dimension? 
@@ -111,9 +153,16 @@ def real_space_density(atoms, element_types, cryst, b):
         atom = atoms[ii]
         scat = scatter_vals[element_types[ii]]
 
-        d2X = ((xv - atom[0] + cryst[0]/2) % cryst[0]) - (cryst[0] / 2)
-        d2Y = ((yv - atom[1] + cryst[1]/2) % cryst[1]) - (cryst[1] / 2)
-        d2Z = ((zv - atom[2] + cryst[2]/2) % cryst[2]) - (cryst[2] / 2)
+        # option to plot on real space axes based on atom coordinates- as of now this doesn't play nice w other axes
+        # d2X = ((xv_r - atom[0] + max_vals[0]/2) % max_vals[0]) - (max_vals[0] / 2)
+        # d2Y = ((yv_r - atom[1] + max_vals[1]/2) % max_vals[1]) - (max_vals[1] / 2)
+        # d2Z = ((zv_r - atom[2] + max_vals[2]/2) % max_vals[2]) - (max_vals[2] / 2)
+
+        # NOTE - swapping Y and Z coords is something specific to 3cad data
+        d2X = ((xv_f - atom[0] + cryst[0]/2) % cryst[0]) - (cryst[0] / 2)
+        d2Y = ((yv_f - atom[2] + cryst[1]/2) % cryst[1]) - (cryst[1] / 2)
+        d2Z = ((zv_f - atom[1] + cryst[2]/2) % cryst[2]) - (cryst[2] / 2)
+        
         d2 = np.power(d2X, 2) + np.power(d2Y, 2) + np.power(d2Z, 2)
         d2_coef = -d2*pi*pi*4 # makes it a little faster
 
@@ -126,6 +175,11 @@ def real_space_density(atoms, element_types, cryst, b):
                     scat[3] * np.sqrt(pi*4/(b+scat[7])) * np.exp(d2_coef/(b+scat[7])) + 
                     scat[4] * np.sqrt(pi*4/(b+scat[8])) * np.exp(d2_coef/(b+scat[8])))
     
+    fig1 = go.Figure(data=go.Volume(x=xv_f.flatten(), y=yv_f.flatten(), z=zv_f.flatten(), 
+                                     value=rho_3d.flatten(), isomin=0.2, isomax=1.0, 
+                                     surface_count=5, opacity=0.5))
+    fig1.show()
+
     return rho_3d, atommask
 
 
@@ -141,76 +195,69 @@ def main():
         quit()
 
     atoms3d, element_types = read_pdb(sys.argv[1])
-
-    global cryst, reso
-
-    # find min and max values of x, y, and z coords to create bounds in 3d space
-    max_vals = np.amax(atoms3d, axis=0) 
-    min_vals = np.amin(atoms3d, axis=0)
-    cryst = [round(int((max_vals[0] - min_vals[0]) / 10)) * 10 + 10, 
-             round(int((max_vals[1] - min_vals[1]) / 10)) * 10 + 10, 
-             round(int((max_vals[2] - min_vals[2]) / 10)) * 10 + 10]
-
-    reso = 0.05
     b = 1
 
     if len(sys.argv) == 3:
         cif_lines = read_cif(sys.argv[2])
-    
-    step = reso / 3
 
-    global xv, yv, zv
-    x_lin = np.linspace(0, int(cryst[0]), int(1 / step)) # int(min_vals[0]), int(max_vals[0]), int(1 / stepXYZ[0]))
-    y_lin = np.linspace(0, int(cryst[1]), int(1 / step)) # int(min_vals[1]), int(max_vals[1]), int(1 / stepXYZ[1]))
-    z_lin = np.linspace(0, int(cryst[2]), int(1 / step)) # int(min_vals[2]), int(max_vals[2]), int(1 / stepXYZ[2]))
-    xv, yv, zv = np.meshgrid(x_lin, y_lin, z_lin)
-    
-    rho_3d, atommask = real_space_density(atoms3d, element_types, cryst, b)
+    # create XYZ linespaces in real space based on atom coords
+    global lin_r
+    lin_r[0] = np.linspace(coord_dims[0][0], coord_dims[1][0], math.ceil((coord_dims[1][0] - coord_dims[0][0]) / reso))
+    lin_r[1] = np.linspace(coord_dims[0][1], coord_dims[1][1], math.ceil((coord_dims[1][1] - coord_dims[0][1]) / reso))
+    lin_r[2] = np.linspace(coord_dims[0][2], coord_dims[1][2], math.ceil((coord_dims[1][2] - coord_dims[0][2]) / reso))
 
-    # doesn't seem to do anything...
+    # create XYZ linespaces in fourier space based on crystal dims
+    global lin_f
+    lin_f[0] = np.linspace(0, cryst[0], math.ceil(cryst[0] / reso))
+    lin_f[1] = np.linspace(0, cryst[1], math.ceil(cryst[1] / reso))
+    lin_f[2] = np.linspace(0, cryst[2], math.ceil(cryst[2] / reso))
+    
+    f_c = reciprocal_space_density(cif_lines)
+    f_realspace = np.fft.ifftn(f_c, f_c.shape)
+
+    rho_3d, atommask = real_space_density(atoms3d, element_types, b)
     rho_3d = np.ma.array(rho_3d, mask = atommask) 
-    fig1 = go.Figure(data=go.Volume(x=xv.flatten(), y=yv.flatten(), z=zv.flatten(), 
-                                     value=rho_3d.flatten(), isomin=0.1, isomax=1.0, 
-                                     surface_count=5, opacity=0.5))
-    fig1.show()
-
-    '''
+    
     # n-dimensionl fourier tranform to get into reciprocal space
-    recip = np.fft.rfftn(rho_3d)
+    r_recip = np.fft.fftn(rho_3d, rho_3d.shape)
+    f_recip = f_c # np.fft.fftn(f_c, rho_3d.shape)
 
     # isolate real and imaginary elements at every point
-    recip_x = recip.real
-    recip_y = recip.imag
+    r_recip_x = r_recip.real
+    r_recip_y = r_recip.imag
+
+    f_recip_x = f_recip.real
+    f_recip_y = f_recip.imag
 
     # use sqrt of x^2 + y^2 to get intensities at every point
-    intensities = np.sqrt(np.square(recip_x) + np.square(recip_y))
+    intensities_exp = np.sqrt(np.square(r_recip_x) + np.square(r_recip_y))
+    intensities_obs = np.sqrt(np.square(f_recip_x) + np.square(f_recip_y))
 
     # use intensities and x values to get the phases
-    phases = np.arccos(recip_x / intensities)
+    phases_exp = np.arccos(r_recip_x / intensities_exp)
 
     # now do the opposite of all of these operations to get back to the original model
-    reconverted_x = intensities * np.cos(phases)
-    reconverted_y = intensities * np.sin(phases)
+    combined_x = intensities_obs * np.cos(phases_exp)
+    combined_y = intensities_obs * np.sin(phases_exp)
     
     # reconverted_y specifically is what is breaking everything right now :/
     # the phase data must be ok if reconverted_x + recip_y * 1j works... what's the difference??
-    reconverted_recip = reconverted_x + recip_y * 1j # reconverted_y * 1j
-    reconverted_model = np.fft.irfftn(reconverted_recip)
+    combined_recip = combined_x + combined_y * 1j
+    combined_model = np.fft.irfftn(combined_recip, rho_3d.shape)
+    combined_model = np.abs(combined_model) / 10 # 000
+    print(combined_model)
 
-    fig2 = go.Figure(data=go.Volume(x=xv.flatten(), y=yv.flatten(), z=zv.flatten(), 
-                                     value=reconverted_model.flatten(), isomin=0.1, isomax=1.0, 
-                                     surface_count=5, opacity=0.5))
-    fig2.show()
+    xv_f, yv_f, zv_f = np.meshgrid(lin_f[0], lin_f[1], lin_f[2])
     '''
+    real_space_aligned = np.zeros((len(xv_r), len(xv_r[0]), len(xv_r[0][0])))
+    for xx in range(len(xv_r)):
+        for yy in range(len(xv_r[0])):
+            for zz in range(len(xv_r[0][0])):
+                real_space_aligned[xx][yy][zz] += combined_model[xx][yy][zz]
+    '''
+    fig3 = go.Figure(data=go.Volume(x=xv_f.flatten(), y=yv_f.flatten(), z=zv_f.flatten(),
+                                     value=combined_model.flatten(), isomin=0.2, isomax=1.0,
+                                     surface_count=5, opacity=0.5))
+    fig3.show()
 
 main()
-
-# adjustments to step size (still don't totally understnd why this is necessary)
-# ceil1 = math.ceil(cryst[0]/step) # 5 * 300 = 1500
-# ceil2 = math.ceil(cryst[1]/step) # 5 * 300 = 1500
-# ceil3 = math.ceil(cryst[2]/step)
-    
-# are there cases where this actually changes the step size?
-# stepXYZ = [ cryst[0] / ceil1, cryst[1] / ceil2, cryst[2] / ceil3];
-
-# create XYZ linespaces for matrices based on step sizes and calculated max/min values

@@ -29,7 +29,7 @@ scatter_vals = dict(H = h_scat, C = c_scat, N = n_scat, O = o_scat, S = s_scat)
 # globals 
 lin_r = [[], [], []]
 lin_f = [[], [], []]
-cryst = [0, 0, 0]
+cryst = [0, 0, 0, 90, 90, 90]
 coord_dims = [[], []]
 reso = 5
 
@@ -50,6 +50,15 @@ def read_cif(filename: str):
             continue
         if '_cell.length_c' in line:
             cryst[2] = float(line[20:])
+            continue
+        if '_cell.angle_alpha' in line:
+            cryst[3] = float(line[20:])
+            continue
+        if '_cell.angle_beta' in line:
+            cryst[4] = float(line[20:])
+            continue
+        if '_cell.angle_gamma' in line:
+            cryst[5] = float(line[20:])
             continue
         if '_diffrn_reflns.pdbx_d_res_high' in line:
             reso = float(line[33:]) / 2
@@ -92,16 +101,21 @@ p(xyz) = 1/V * sum(|Fhkl| .* e^(-i * (2pihx + 2piky + 2pilz))) ==> e^-it = cost 
          1/V * sum(|Fhkl| .* (cos(2pihx + 2piky + 2pilz) - isin(2pihx + 2piky + 2pilz)))
 need to determine volume and do this operation for every value of hkl and xyz
 
-simplified when unit cell is "centrosymmetric"
+simplified when unit cell is "centrosymmetric" (otherwise i think this is where be plug in abc angles...)
 2/V * sum(|Fhkl| .* cos2pi(hx + ky + lz)) - so basically it gets rid of the sin part of the equation?
 '''
 def reciprocal_space_density(cif_data):
     xv_f, yv_f, zv_f = np.meshgrid(lin_f[0], lin_f[1], lin_f[2])
     f_c = np.zeros((len(xv_f), len(xv_f[0]), len(xv_f[0][0])))
-    
+
     # create linespaces to iterate thru xyz
     # for each xyz point calculate p value based on equation from site
     cryst_vol = cryst[0] * cryst[1] * cryst[2]
+
+    # need to determine how far off from cartesian space our coordinates are
+    delta_h = cryst[3] - 90.0
+    delta_k = cryst[4] - 90.0
+    delta_l = cryst[5] - 90.0
 
     for ii in tqdm.tqdm(range(len(cif_data) - 1), "Creating density map from raw crystal data"):
         data = cif_data[ii].split()
@@ -113,20 +127,25 @@ def reciprocal_space_density(cif_data):
         if data[6] != 'o' and data[6] != 'f':
             continue
     
+        # NOTE this currently does not take symmetry into account- might just need to do an operation on 'k' 
         # h k l are data[3-5]
-        hkl_coef = 2 * np.pi * (float(data[3]) * xv_f + float(data[4]) * yv_f + float(data[5]) * zv_f)
-        complex_val = np.cos(hkl_coef) - 1j* np.sin(hkl_coef)
-        f_c += (abs(float(data[7])) * hkl_coef)
-    
-    f_c = f_c / cryst_vol
+        hkl_coef = ((float(data[3]) - delta_h) * xv_f +
+                    (float(data[4]) - delta_k) * yv_f +
+                    (float(data[5]) - delta_l) * zv_f)
+        cos_val = np.cos(2 * np.pi * hkl_coef) # how do we do this in fractional space without imaginary element?
 
-    f_realspace = np.fft.irfftn(f_c, f_c.shape) # , f_c.shape)
+        # this line here is actually doing a fourier transform
+        # to use patterson equation, square intensity and don't multiply by 2
+        f_c = np.add(f_c, (abs(float(data[7])) * cos_val))
+
+    # 2 is because we are assuming centrosymmetry (cartesian = fractional?)
+    f_c = 2 * f_c / cryst_vol
+    print(f_c)
     fig1 = go.Figure(data=go.Volume(x=xv_f.flatten(), y=yv_f.flatten(), z=zv_f.flatten(), 
-                                     value=f_realspace.flatten(), isomin=0.2, isomax=1.0, 
+                                     value=f_c.flatten(), isomin=0.2, isomax=1.0, 
                                      surface_count=5, opacity=0.5))
     fig1.show()
-
-    return f_c 
+    return f_c
 
 # atoms: coordinates of atoms read from pdb
 # element_types: element types of atoms read from pdb
@@ -134,15 +153,9 @@ def reciprocal_space_density(cif_data):
 # b: b factor(s) #TODO
 def real_space_density(atoms, element_types, b):
     global cryst
-
-    max_vals = coord_dims[1] - coord_dims[0]
-    xv_r, yv_r, zv_r = np.meshgrid(lin_r[0], lin_r[1], lin_r[2])
     xv_f, yv_f, zv_f = np.meshgrid(lin_f[0], lin_f[1], lin_f[2])
 
     # rho starts as all zeros and every atom iteration will add info to it 
-    rho_3d = np.zeros((len(xv_r), len(xv_r[0]), len(xv_r[0][0]))) # each meshgrid array has correct dimensions so we can use xv
-    atommask = np.full((len(xv_r), len(xv_r[0]), len(xv_r[0][0])), False, dtype=bool)
-
     rho_3d = np.zeros((len(xv_f), len(xv_f[0]), len(xv_f[0][0]))) # each meshgrid array has correct dimensions so we can use xv
     atommask = np.full((len(xv_f), len(xv_f[0]), len(xv_f[0][0])), False, dtype=bool)
     
@@ -153,28 +166,37 @@ def real_space_density(atoms, element_types, b):
         atom = atoms[ii]
         scat = scatter_vals[element_types[ii]]
 
-        # option to plot on real space axes based on atom coordinates- as of now this doesn't play nice w other axes
-        # d2X = ((xv_r - atom[0] + max_vals[0]/2) % max_vals[0]) - (max_vals[0] / 2)
-        # d2Y = ((yv_r - atom[1] + max_vals[1]/2) % max_vals[1]) - (max_vals[1] / 2)
-        # d2Z = ((zv_r - atom[2] + max_vals[2]/2) % max_vals[2]) - (max_vals[2] / 2)
-
         # NOTE - swapping Y and Z coords is something specific to 3cad data
-        d2X = ((xv_f - atom[0] + cryst[0]/2) % cryst[0]) - (cryst[0] / 2)
-        d2Y = ((yv_f - atom[2] + cryst[1]/2) % cryst[1]) - (cryst[1] / 2)
-        d2Z = ((zv_f - atom[1] + cryst[2]/2) % cryst[2]) - (cryst[2] / 2)
-        
+        d2X = ((xv_f - atom[0] + cryst[0]/2) % cryst[0]) - (cryst[0]/2)
+        d2Y = ((yv_f - atom[1] + cryst[1]/2) % cryst[1]) - (cryst[1]/2)
+        d2Z = ((zv_f - atom[2] + cryst[2]/2) % cryst[2]) - (cryst[2]/2)
         d2 = np.power(d2X, 2) + np.power(d2Y, 2) + np.power(d2Z, 2)
         d2_coef = -d2*pi*pi*4 # makes it a little faster
 
+        '''
+        d2X_1 = ((xv_f + atom[0] + cryst[0]/2) % cryst[0]) - (cryst[0]/2)
+        d2Y_1 = ((yv_f + atom[1] + cryst[1]/2) % cryst[1]) - (cryst[1]/2)
+        d2Z_1 = ((zv_f + atom[2] + cryst[2]/2) % cryst[2]) - (cryst[2]/2)
+        d2_1 = np.power(d2X_1, 2) + np.power(d2Y_1, 2) + np.power(d2Z_1, 2)
+        d2_coef_1 = -d2_1*pi*pi*4 # makes it a little faster
+        '''
         atommask = np.logical_or(atommask, d2 < 3.2 * 3.2 * 3.2) # don't think this does anything
 
         # NOTE what data can be thrown away?
+        # TODO also for symmetrical equivalents ???
         rho_3d += (scat[0] * np.sqrt(pi*4/b) * np.exp(d2_coef/b) + 
                     scat[1] * np.sqrt(pi*4/(b+scat[5])) * np.exp(d2_coef/(b+scat[5])) + 
                     scat[2] * np.sqrt(pi*4/(b+scat[6])) * np.exp(d2_coef/(b+scat[6])) + 
                     scat[3] * np.sqrt(pi*4/(b+scat[7])) * np.exp(d2_coef/(b+scat[7])) + 
                     scat[4] * np.sqrt(pi*4/(b+scat[8])) * np.exp(d2_coef/(b+scat[8])))
-    
+        '''
+        rho_3d += (scat[0] * np.sqrt(pi*4/b) * np.exp(d2_coef_1/b) +
+                    scat[1] * np.sqrt(pi*4/(b+scat[5])) * np.exp(d2_coef_1/(b+scat[5])) +
+                    scat[2] * np.sqrt(pi*4/(b+scat[6])) * np.exp(d2_coef_1/(b+scat[6])) +
+                    scat[3] * np.sqrt(pi*4/(b+scat[7])) * np.exp(d2_coef_1/(b+scat[7])) +
+                    scat[4] * np.sqrt(pi*4/(b+scat[8])) * np.exp(d2_coef_1/(b+scat[8])))
+        '''
+
     fig1 = go.Figure(data=go.Volume(x=xv_f.flatten(), y=yv_f.flatten(), z=zv_f.flatten(), 
                                      value=rho_3d.flatten(), isomin=0.2, isomax=1.0, 
                                      surface_count=5, opacity=0.5))
@@ -213,14 +235,12 @@ def main():
     lin_f[2] = np.linspace(0, cryst[2], math.ceil(cryst[2] / reso))
     
     f_c = reciprocal_space_density(cif_lines)
-    f_realspace = np.fft.ifftn(f_c, f_c.shape)
-
     rho_3d, atommask = real_space_density(atoms3d, element_types, b)
     rho_3d = np.ma.array(rho_3d, mask = atommask) 
     
     # n-dimensionl fourier tranform to get into reciprocal space
     r_recip = np.fft.fftn(rho_3d, rho_3d.shape)
-    f_recip = f_c # np.fft.fftn(f_c, rho_3d.shape)
+    f_recip = np.fft.fftn(f_c, rho_3d.shape)
 
     # isolate real and imaginary elements at every point
     r_recip_x = r_recip.real
@@ -244,17 +264,10 @@ def main():
     # the phase data must be ok if reconverted_x + recip_y * 1j works... what's the difference??
     combined_recip = combined_x + combined_y * 1j
     combined_model = np.fft.irfftn(combined_recip, rho_3d.shape)
-    combined_model = np.abs(combined_model) / 10 # 000
+    combined_model = combined_model
     print(combined_model)
 
     xv_f, yv_f, zv_f = np.meshgrid(lin_f[0], lin_f[1], lin_f[2])
-    '''
-    real_space_aligned = np.zeros((len(xv_r), len(xv_r[0]), len(xv_r[0][0])))
-    for xx in range(len(xv_r)):
-        for yy in range(len(xv_r[0])):
-            for zz in range(len(xv_r[0][0])):
-                real_space_aligned[xx][yy][zz] += combined_model[xx][yy][zz]
-    '''
     fig3 = go.Figure(data=go.Volume(x=xv_f.flatten(), y=yv_f.flatten(), z=zv_f.flatten(),
                                      value=combined_model.flatten(), isomin=0.2, isomax=1.0,
                                      surface_count=5, opacity=0.5))

@@ -171,14 +171,14 @@ def real_space_density(atoms, element_types, b):
         d2Y = ((yv_f - atom[1] + cryst[1]/2) % cryst[1]) - (cryst[1]/2)
         d2Z = ((zv_f - atom[2] + cryst[2]/2) % cryst[2]) - (cryst[2]/2)
         d2 = np.power(d2X, 2) + np.power(d2Y, 2) + np.power(d2Z, 2)
-        d2_coef = -d2*pi*pi*4 # makes it a little faster
+        d2_coef = -d2*pi*pi*4 
 
         '''
         d2X_1 = ((xv_f + atom[0] + cryst[0]/2) % cryst[0]) - (cryst[0]/2)
-        d2Y_1 = ((yv_f + atom[1] + cryst[1]/2) % cryst[1]) - (cryst[1]/2)
+        d2Y_1 = ((yv_f - atom[1] + cryst[1]/2) % cryst[1]) - (cryst[1]/2)
         d2Z_1 = ((zv_f + atom[2] + cryst[2]/2) % cryst[2]) - (cryst[2]/2)
         d2_1 = np.power(d2X_1, 2) + np.power(d2Y_1, 2) + np.power(d2Z_1, 2)
-        d2_coef_1 = -d2_1*pi*pi*4 # makes it a little faster
+        d2_coef_1 = -d2_1*pi*pi*4 
         '''
         atommask = np.logical_or(atommask, d2 < 3.2 * 3.2 * 3.2) # don't think this does anything
 
@@ -196,7 +196,6 @@ def real_space_density(atoms, element_types, b):
                     scat[3] * np.sqrt(pi*4/(b+scat[7])) * np.exp(d2_coef_1/(b+scat[7])) +
                     scat[4] * np.sqrt(pi*4/(b+scat[8])) * np.exp(d2_coef_1/(b+scat[8])))
         '''
-
     fig1 = go.Figure(data=go.Volume(x=xv_f.flatten(), y=yv_f.flatten(), z=zv_f.flatten(), 
                                      value=rho_3d.flatten(), isomin=0.2, isomax=1.0, 
                                      surface_count=5, opacity=0.5))
@@ -242,28 +241,18 @@ def main():
     r_recip = np.fft.fftn(rho_3d, rho_3d.shape)
     f_recip = np.fft.fftn(f_c, rho_3d.shape)
 
-    # isolate real and imaginary elements at every point
-    r_recip_x = r_recip.real
-    r_recip_y = r_recip.imag
-
-    f_recip_x = f_recip.real
-    f_recip_y = f_recip.imag
-
-    # use sqrt of x^2 + y^2 to get intensities at every point
-    intensities_exp = np.sqrt(np.square(r_recip_x) + np.square(r_recip_y))
-    intensities_obs = np.sqrt(np.square(f_recip_x) + np.square(f_recip_y))
-
-    # use intensities and x values to get the phases
-    phases_exp = np.arccos(r_recip_x / intensities_exp)
+    # calculate phases and intensities from respective reciprocal matrices
+    intensities = np.abs(f_recip)
+    phases = np.angle(r_recip)
 
     # now do the opposite of all of these operations to get back to the original model
-    combined_x = intensities_obs * np.cos(phases_exp)
-    combined_y = intensities_obs * np.sin(phases_exp)
+    combined_x = intensities * np.cos(phases)
+    combined_y = intensities * np.sin(phases)
     
     # reconverted_y specifically is what is breaking everything right now :/
     # the phase data must be ok if reconverted_x + recip_y * 1j works... what's the difference??
     combined_recip = combined_x + combined_y * 1j
-    combined_model = np.fft.irfftn(combined_recip, rho_3d.shape)
+    combined_model = np.fft.irfftn(combined_recip, combined_recip.shape)
     combined_model = combined_model
     print(combined_model)
 
